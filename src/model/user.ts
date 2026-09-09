@@ -1,13 +1,3 @@
-export interface User {
-    readonly count: number;
-    readonly page_info: PageInfo;
-    readonly edges: UserEdge[];
-}
-
-export interface UserEdge {
-    readonly node: UserNode;
-}
-
 export interface UserNode {
     readonly id: string;
     readonly username: string;
@@ -18,7 +8,11 @@ export interface UserNode {
     readonly followed_by_viewer: boolean;
     readonly follows_viewer: boolean;
     readonly requested_by_viewer: boolean;
-    readonly reel: Reel;
+    // Optional: populated only for the local preview/demo data. The private
+    // REST endpoints used for real scans (see utils/utils.ts) don't return
+    // story-reel data, and nothing in the app reads this field, so it's kept
+    // only so the preview users can still be built with a full shape.
+    readonly reel?: Reel;
 }
 
 export interface Reel {
@@ -39,9 +33,4 @@ export interface Owner {
 
 export enum Typename {
     GraphUser = 'GraphUser',
-}
-
-export interface PageInfo {
-    readonly has_next_page: boolean;
-    readonly end_cursor: string;
 }

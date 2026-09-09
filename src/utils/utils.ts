@@ -1,5 +1,5 @@
 import { UserNode } from "../model/user";
-import { UNFOLLOWERS_PER_PAGE, WITHOUT_PROFILE_PICTURE_URL_IDS } from "../constants/constants";
+import { INSTAGRAM_WEB_APP_ID, UNFOLLOWERS_PER_PAGE, WITHOUT_PROFILE_PICTURE_URL_IDS } from "../constants/constants";
 import { ScanningTab } from "../model/scanning-tab";
 import { ScanningFilter } from "../model/scanning-filter";
 import { UnfollowLogEntry } from "../model/unfollow-log-entry";
@@ -160,15 +160,70 @@ export function getCookie(name: string): string | null {
   return parts.pop()!.split(';').shift()!;
 }
 
-export function urlGenerator(nextCode?: string): string {
-  const ds_user_id = getCookie('ds_user_id');
-  if (nextCode === undefined) {
-    // First url
-    return `https://www.instagram.com/graphql/query/?query_hash=3dec7e2c57367ef3da3d987d89f9dbc8&variables={"id":"${ds_user_id}","include_reel":"true","fetch_mutual":"false","first":"24"}`;
-  }
-  return `https://www.instagram.com/graphql/query/?query_hash=3dec7e2c57367ef3da3d987d89f9dbc8&variables={"id":"${ds_user_id}","include_reel":"true","fetch_mutual":"false","first":"24","after":"${nextCode}"}`;
-}
-
 export function unfollowUserUrlGenerator(idToUnfollow: string): string {
   return `https://www.instagram.com/web/friendships/${idToUnfollow}/unfollow/`;
+}
+
+export type FriendshipsListKind = 'following' | 'followers';
+
+/**
+ * A single user entry as returned by Instagram's private
+ * /api/v1/friendships/<id>/following|followers/ REST endpoints. This is a
+ * different (and much less rich) shape than the old public GraphQL
+ * following-edges endpoint this app used to call, which was the actual
+ * cause of scans always completing instantly with 0 results: that GraphQL
+ * `query_hash` is a years-old, publicly-known value that Instagram now
+ * serves as a structurally-valid but data-empty response (200 OK, correct
+ * total count, zero edges, has_next_page: false) rather than an outright
+ * error, so the old code had no way to detect the failure.
+ */
+export interface RawFriendshipUser {
+  readonly pk: string;
+  readonly username: string;
+  readonly full_name?: string;
+  readonly profile_pic_url: string;
+  readonly is_private?: boolean;
+  readonly is_verified?: boolean;
+}
+
+export interface FriendshipsPage {
+  readonly users?: readonly RawFriendshipUser[];
+  // Instagram sometimes omits next_max_id even when has_more is true right
+  // at the very end of a list; both are checked when deciding to continue.
+  readonly next_max_id?: string;
+  readonly has_more?: boolean;
+}
+
+export function friendshipsUrlGenerator(kind: FriendshipsListKind, maxId?: string): string {
+  const viewerId = getCookie('ds_user_id');
+  const base = `https://www.instagram.com/api/v1/friendships/${viewerId}/${kind}/?count=200`;
+  return maxId === undefined ? base : `${base}&max_id=${encodeURIComponent(maxId)}`;
+}
+
+export async function fetchFriendshipsPage(kind: FriendshipsListKind, maxId?: string): Promise<FriendshipsPage> {
+  const response = await fetch(friendshipsUrlGenerator(kind, maxId), {
+    credentials: 'same-origin',
+    headers: { 'X-IG-App-ID': INSTAGRAM_WEB_APP_ID },
+  });
+  if (!response.ok) {
+    throw new Error(`Instagram returned HTTP ${response.status} while fetching ${kind}`);
+  }
+  return response.json() as Promise<FriendshipsPage>;
+}
+
+export function rawFriendshipUserToUserNode(raw: RawFriendshipUser, followsViewer: boolean): UserNode {
+  return {
+    id: raw.pk,
+    username: raw.username,
+    full_name: raw.full_name ?? '',
+    profile_pic_url: raw.profile_pic_url,
+    is_private: raw.is_private ?? false,
+    is_verified: raw.is_verified ?? false,
+    // These endpoints don't expose either of these, and nothing in the app
+    // reads them beyond this mapping, so they're set to the values that are
+    // true by construction for entries drawn from your own following list.
+    followed_by_viewer: true,
+    requested_by_viewer: false,
+    follows_viewer: followsViewer,
+  };
 }

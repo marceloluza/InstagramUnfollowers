@@ -2,19 +2,28 @@ import React, { ChangeEvent, useEffect, useState } from "react";
 import { render } from "react-dom";
 import "./styles.scss";
 
-import { Typename, User, UserNode } from "./model/user";
+import { Typename, UserNode } from "./model/user";
 import { Toast } from "./components/Toast";
 import { UserCheckIcon } from "./components/icons/UserCheckIcon";
 import { UserUncheckIcon } from "./components/icons/UserUncheckIcon";
 import { DEFAULT_TIME_BETWEEN_SEARCH_CYCLES,
   DEFAULT_TIME_BETWEEN_UNFOLLOWS,
   DEFAULT_TIME_TO_WAIT_AFTER_FIVE_SEARCH_CYCLES,
-  DEFAULT_TIME_TO_WAIT_AFTER_FIVE_UNFOLLOWS, INSTAGRAM_HOSTNAME } from "./constants/constants";
+  DEFAULT_TIME_TO_WAIT_AFTER_FIVE_UNFOLLOWS,
+  FOLLOWERS_PAGE_SAFETY_LIMIT,
+  FOLLOWING_PAGE_SAFETY_LIMIT,
+  INSTAGRAM_HOSTNAME } from "./constants/constants";
 import {
   assertUnreachable,
+  fetchFriendshipsPage,
+  FriendshipsListKind,
   getCookie,
   getCurrentPageUnfollowers,
-  getUsersForDisplay, sleep, unfollowUserUrlGenerator, urlGenerator,
+  getUsersForDisplay,
+  RawFriendshipUser,
+  rawFriendshipUserToUserNode,
+  sleep,
+  unfollowUserUrlGenerator,
 } from "./utils/utils";
 import { NotSearching } from "./components/NotSearching";
 import { State } from "./model/state";
@@ -336,48 +345,65 @@ function App() {
   }, [isActiveProcess, state]);
 
   useEffect(() => {
-    const scan = async () => {
-      if (state.status !== "scanning" || isLocalPreview) {
-        return;
-      }
-      const results = [...state.results];
+    // Instagram's private following/followers endpoints (see
+    // utils/utils.ts) don't expose a reliable total count up front the way
+    // the old GraphQL endpoint did, so we can't compute an exact
+    // percentage. This gives a smooth, ever-increasing estimate within a
+    // phase's share of the progress bar without ever overselling 100%
+    // before the phase is actually done.
+    const estimatePhaseProgress = (usersFetchedSoFar: number): number =>
+      100 * (1 - 1 / (1 + usersFetchedSoFar / 150));
+
+    // Fetches every page of `kind` (following or followers), applying the
+    // same pacing/pause/backoff behavior the original single-endpoint scan
+    // used, and reports progress within [progressRangeStart, progressRangeEnd]
+    // of the overall percentage bar.
+    const fetchList = async (
+      kind: FriendshipsListKind,
+      pageSafetyLimit: number,
+      progressRangeStart: number,
+      progressRangeEnd: number,
+    ): Promise<readonly RawFriendshipUser[]> => {
+      let users: readonly RawFriendshipUser[] = [];
+      let maxId: string | undefined;
+      let pagesFetched = 0;
       let scrollCycle = 0;
-      let url = urlGenerator();
-      let hasNext = true;
-      let currentFollowedUsersCount = 0;
-      let totalFollowedUsersCount = -1;
 
-      while (hasNext) {
-        let receivedData: User;
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+      while (true) {
+        let page;
         try {
-          receivedData = (await fetch(url).then(res => res.json())).data.user.edge_follow;
+          page = await fetchFriendshipsPage(kind, maxId);
         } catch (e) {
-          console.error(e);
-          continue;
+          console.error(`Stopping ${kind} scan early:`, e);
+          break;
         }
 
-        if (totalFollowedUsersCount === -1) {
-          totalFollowedUsersCount = receivedData.count;
-        }
-
-        hasNext = receivedData.page_info.has_next_page;
-        url = urlGenerator(receivedData.page_info.end_cursor);
-        currentFollowedUsersCount += receivedData.edges.length;
-        receivedData.edges.forEach(x => results.push(x.node));
+        const pageUsers = page.users ?? [];
+        users = users.concat(pageUsers);
 
         setState(prevState => {
           if (prevState.status !== "scanning") {
             return prevState;
           }
-          const newState: State = {
+          const rangeSize = progressRangeEnd - progressRangeStart;
+          return {
             ...prevState,
-            // Fix: Changed from Math.floor to Math.round to ensure progress reaches 100%
-            // Math.floor would leave progress at 99% when near completion
-            percentage: Math.round((currentFollowedUsersCount / totalFollowedUsersCount) * 100),
-            results,
+            percentage: Math.round(progressRangeStart + estimatePhaseProgress(users.length) * (rangeSize / 100)),
           };
-          return newState;
         });
+
+        const hasMore = page.has_more !== false && page.next_max_id !== undefined;
+        if (!hasMore || pageUsers.length === 0) {
+          break;
+        }
+
+        pagesFetched += 1;
+        if (pagesFetched >= pageSafetyLimit) {
+          console.error(`Stopping ${kind} scan early: hit the safety cap of ${pageSafetyLimit} pages with ${users.length} users fetched.`);
+          break;
+        }
+        maxId = page.next_max_id;
 
         // Pause scanning if user requested so.
         while (scanningPaused) {
@@ -391,7 +417,7 @@ function App() {
 
         // Standard delay between cycles
         await sleep(Math.floor(Math.random() * (timings.timeBetweenSearchCycles - timings.timeBetweenSearchCycles * 0.7)) + timings.timeBetweenSearchCycles);
-        
+
         scrollCycle++;
         if (scrollCycle > 6) {
           scrollCycle = 0;
@@ -405,6 +431,28 @@ function App() {
         }
         setToast({ show: false });
       }
+
+      return users;
+    };
+
+    const scan = async () => {
+      if (state.status !== "scanning" || isLocalPreview) {
+        return;
+      }
+
+      // Two lists are needed because these REST endpoints don't tell us,
+      // per followed account, whether that account follows us back (unlike
+      // the old GraphQL edge this app used to read `follows_viewer` from) —
+      // so it's computed here by diffing who you follow against who
+      // follows you.
+      const followingUsers = await fetchList('following', FOLLOWING_PAGE_SAFETY_LIMIT, 0, 45);
+      const followerUsers = await fetchList('followers', FOLLOWERS_PAGE_SAFETY_LIMIT, 45, 95);
+
+      const followerIds = new Set(followerUsers.map(user => user.pk));
+      const results: UserNode[] = followingUsers.map(user =>
+        rawFriendshipUserToUserNode(user, followerIds.has(user.pk)),
+      );
+
       setState(prevState => {
         if (prevState.status !== 'scanning') {
           return prevState;
@@ -412,6 +460,7 @@ function App() {
         const newState: State = {
           ...prevState,
           percentage: 100,
+          results,
         };
         return newState;
       });

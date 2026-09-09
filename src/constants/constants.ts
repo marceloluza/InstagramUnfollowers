@@ -1,5 +1,20 @@
 export const INSTAGRAM_HOSTNAME = "www.instagram.com";
 export const UNFOLLOWERS_PER_PAGE = 50;
+
+// The app id Instagram's own web frontend sends on its private REST API
+// calls (e.g. /api/v1/friendships/<id>/following/). Required or these
+// endpoints behave inconsistently; it is not a secret, just an identifier
+// for "the instagram.com web client" and is safe to keep public.
+export const INSTAGRAM_WEB_APP_ID = "936619743392459";
+
+// Page-count safety caps for the following/followers scan (see
+// utils/utils.ts fetchAllFriendships and main.tsx). Instagram serves the
+// followers list back in small, server-controlled chunks (observed ~15-25
+// users/page, ignoring the `count` we request) rather than the larger
+// chunks it gives for the following list, so followers needs a much higher
+// cap to be able to finish a full scan.
+export const FOLLOWING_PAGE_SAFETY_LIMIT = 60;
+export const FOLLOWERS_PAGE_SAFETY_LIMIT = 250;
 export const WHITELISTED_RESULTS_STORAGE_KEY = "iu_whitelisted-results";
 export const TIMINGS_STORAGE_KEY = "iu_timings";
 
